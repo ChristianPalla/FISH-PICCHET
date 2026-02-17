@@ -205,10 +205,10 @@ class GaraManager:
         except: pass
 
 # --- CONFIGURAZIONE ---
-N_CONCORRENTI = 36
+N_CONCORRENTI = 12
 M_SETTORI = 6
 N_TURNI = 4
-TARGET_MIN_SALTO = 2 
+TARGET_MIN_SALTO = 3 
 
 def main():
     print("\n" + "="*70)
