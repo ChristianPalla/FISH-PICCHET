@@ -7,242 +7,226 @@ import csv
 sys.setrecursionlimit(5000)
 
 class GaraManager:
-    def __init__(self, n_concorrenti, m_settori, max_salto):
+    def __init__(self, n_concorrenti, m_settori, min_salto_imposto):
         self.n = n_concorrenti
         self.m = m_settori
-        self.max_salto = max_salto
         self.picchetti_per_settore = n_concorrenti // m_settori
         
-        # Strutture Dati
+        # Impostazioni Distanza
+        self.target_min_salto = min_salto_imposto
+        self.max_salto_limite = self.n // 2
+        
         self.storia_visite = {i: set() for i in range(1, self.n + 1)}
-        self.stato_attuale = {}
-        self.tabella_turni = [] # Lista di dizionari per lo storico
+        self.tabella_turni = [] 
         
     def ottieni_settore(self, p_idx):
         return p_idx // self.picchetti_per_settore
 
+    def get_vicini_turno_precedente(self, dati_turno_prec):
+        vietati = {i: set() for i in range(1, self.n + 1)}
+        mappa_pos = {pos: cid for cid, pos in dati_turno_prec.items()}
+        for pos in range(self.n):
+            if pos in mappa_pos:
+                curr_id = mappa_pos[pos]
+                sx = (pos - 1 + self.n) % self.n
+                dx = (pos + 1) % self.n
+                if sx in mappa_pos: vietati[curr_id].add(mappa_pos[sx])
+                if dx in mappa_pos: vietati[curr_id].add(mappa_pos[dx])
+        return vietati
+
     def inizializza(self):
-        """Assegnazione casuale iniziale"""
         posizioni = list(range(self.n))
         random.shuffle(posizioni)
+        stato_iniziale = {}
         for i in range(1, self.n + 1):
             pos = posizioni.pop()
-            self.stato_attuale[i] = pos
+            stato_iniziale[i] = pos
             self.storia_visite[i].add(pos)
-        
-        # Salva turno 0
-        self.tabella_turni.append({'turno': 0, 'dati': self.stato_attuale.copy()})
+        self.tabella_turni.append({'turno': 0, 'dati': stato_iniziale})
 
-    def _backtrack_solve(self, idx_conc, elenco_conc, assegnazioni_turno, occupati_turno):
-        """Motore ricorsivo per trovare la soluzione del turno"""
-        # Caso Base: Tutti sistemati
-        if idx_conc >= len(elenco_conc):
-            return assegnazioni_turno
+    def _backtrack_solve(self, idx_conc, elenco_conc, assegnazioni_turno, occupati_turno, 
+                         vicini_vietati, mappa_pos_corrente, 
+                         min_salto_attuale, consenti_vicini):
+        if idx_conc >= len(elenco_conc): return assegnazioni_turno
 
         cid = elenco_conc[idx_conc]
-        pos_old = self.stato_attuale[cid]
+        dati_prev = self.tabella_turni[-1]['dati']
+        pos_old = dati_prev[cid]
         sett_old = self.ottieni_settore(pos_old)
 
-        # Genera mosse possibili (mescolate)
-        salti = list(range(1, self.max_salto + 1))
-        random.shuffle(salti)
+        range_salti = list(range(min_salto_attuale, self.max_salto_limite + 1))
+        range_salti.sort(key=lambda x: x + random.uniform(0, 2.0))
 
-        for salto in salti:
+        for salto in range_salti:
             pos_new = (pos_old + salto) % self.n
-            
-            # --- FILTRI DI VALIDITÀ ---
-            if pos_new in occupati_turno: continue          # Già preso ora
-            if pos_new in self.storia_visite[cid]: continue # Già visitato in passato
+            if pos_new in occupati_turno: continue
+            if pos_new in self.storia_visite[cid]: continue
             
             sett_new = self.ottieni_settore(pos_new)
+            if sett_new == sett_old: continue 
             
-            # Regole Settori (Strict)
-            if sett_new == sett_old: continue
-            if sett_new == (sett_old + 1) % self.m: continue
-            if sett_new == (sett_old - 1 + self.m) % self.m: continue
+            if not consenti_vicini:
+                sx = (pos_new - 1 + self.n) % self.n
+                dx = (pos_new + 1) % self.n
+                mossa_ko = False
+                if sx in mappa_pos_corrente and mappa_pos_corrente[sx] in vicini_vietati[cid]: mossa_ko = True
+                if dx in mappa_pos_corrente and mappa_pos_corrente[dx] in vicini_vietati[cid]: mossa_ko = True
+                if mossa_ko: continue
 
-            # --- TENTATIVO ---
-            # Applica mossa temporanea
             occupati_turno.add(pos_new)
             assegnazioni_turno[cid] = pos_new
+            mappa_pos_corrente[pos_new] = cid
             
-            # Ricorsione
-            res = self._backtrack_solve(idx_conc + 1, elenco_conc, assegnazioni_turno, occupati_turno)
+            res = self._backtrack_solve(idx_conc + 1, elenco_conc, assegnazioni_turno, occupati_turno, 
+                                        vicini_vietati, mappa_pos_corrente, 
+                                        min_salto_attuale, consenti_vicini)
+            if res: return res
             
-            if res is not None:
-                return res # Successo! Risaliamo la china
-            
-            # Backtrack (Annulla mossa e riprova prossimo salto)
             del assegnazioni_turno[cid]
+            del mappa_pos_corrente[pos_new]
             occupati_turno.remove(pos_new)
-
-        return None # Nessuna mossa valida trovata per questo ramo
+        return None
 
     def calcola_turno(self, numero_turno):
-        """Gestisce il tentativo di calcolo con Retry"""
-        MAX_RETRIES = 10
+        dati_prev = self.tabella_turni[-1]['dati']
+        vicini_vietati = self.get_vicini_turno_precedente(dati_prev)
         
-        for tentativo in range(1, MAX_RETRIES + 1):
-            # Prepariamo l'ordine casuale di risoluzione
-            concorrenti = list(range(1, self.n + 1))
-            random.shuffle(concorrenti)
-            
-            occupati = set()
-            assegnazioni = {}
-            
-            print(f"   > Elaborazione Turno {numero_turno} (Tentativo {tentativo}/{MAX_RETRIES})...", end='\r')
-            
-            risultato = self._backtrack_solve(0, concorrenti, assegnazioni, occupati)
-            
-            if risultato is not None:
-                # Successo
-                self.stato_attuale = risultato
-                for cid, pos in risultato.items():
-                    self.storia_visite[cid].add(pos)
-                
-                self.tabella_turni.append({'turno': numero_turno, 'dati': risultato.copy()})
-                return True
-            
-            # Se fallisce, il ciclo continua e riprova con un shuffle diverso
-        
+        fasi = [
+            {"nome": "RIGIDA", "min_salto": self.target_min_salto, "allow_vicini": False, "retries": 15},
+            {"nome": "FLESSIBILE", "min_salto": self.target_min_salto, "allow_vicini": True, "retries": 10},
+            {"nome": "SOPRAVVIVENZA", "min_salto": 1, "allow_vicini": True, "retries": 10}
+        ]
+
+        for fase in fasi:
+            for _ in range(fase['retries']):
+                concorrenti = list(range(1, self.n + 1))
+                random.shuffle(concorrenti)
+                risultato = self._backtrack_solve(0, concorrenti, {}, set(), vicini_vietati, {}, fase['min_salto'], fase['allow_vicini'])
+                if risultato:
+                    if fase['nome'] != "RIGIDA":
+                        print(f"   [AVVISO] T{numero_turno}: Soluzione trovata in modalità {fase['nome']}.")
+                    for cid, pos in risultato.items(): self.storia_visite[cid].add(pos)
+                    self.tabella_turni.append({'turno': numero_turno, 'dati': risultato})
+                    return True
         return False
 
-    def esporta_csv(self, filename="rotazione_picchetti.csv"):
-        """Salva i risultati su file"""
-        try:
-            with open(filename, mode='w', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file, delimiter=';')
-                
-                # Header
-                header = ["ID Concorrente", "Partenza (Sett - Picc)"]
-                for t in range(1, len(self.tabella_turni)):
-                    header.append(f"Turno {t} (Sett - Picc)")
-                    header.append(f"Salto {t}")
-                writer.writerow(header)
-                
-                # Righe
-                for cid in range(1, self.n + 1):
-                    row = [f"ID {cid}"]
-                    
-                    # Partenza
-                    pos0 = self.tabella_turni[0]['dati'][cid]
-                    sett0 = self.ottieni_settore(pos0) + 1
-                    row.append(f"S{sett0}-P{pos0+1}")
-                    
-                    # Turni
-                    for t in range(1, len(self.tabella_turni)):
-                        pos_curr = self.tabella_turni[t]['dati'][cid]
-                        pos_prev = self.tabella_turni[t-1]['dati'][cid]
-                        sett_curr = self.ottieni_settore(pos_curr) + 1
-                        salto = (pos_curr - pos_prev + self.n) % self.n
-                        
-                        row.append(f"S{sett_curr}-P{pos_curr+1}")
-                        row.append(f"+{salto}")
-                    
-                    writer.writerow(row)
-            print(f"\n[OK] File '{filename}' salvato con successo.")
-        except Exception as e:
-            print(f"\n[ERRORE] Impossibile salvare CSV: {e}")
-
-    def stampa_tabella_unicode(self):
-        """Stampa a video con grafica avanzata"""
-        turni = len(self.tabella_turni) - 1
+    def stampa_tabella_perfetta(self):
+        """
+        Versione corretta: elimina gli spazi manuali e usa solo padding.
+        """
+        turni_totali = len(self.tabella_turni) - 1
         
-        # Larghezze colonne
-        w_id = 10
-        w_cell = 20
+        # DEFINIZIONE LARGHEZZE (Modificabili)
+        W_ID = 10       
+        W_DATA = 20     
         
         # Caratteri Box-Drawing
-        TL, TM, TR = '╔', '╦', '╗'
-        BL, BM, BR = '╚', '╩', '╝'
-        VL, VM, VR = '╠', '╬', '╣'
-        V, H = '║', '═'
+        C_TL, C_TM, C_TR = '╔', '╦', '╗'
+        C_BL, C_BM, C_BR = '╚', '╩', '╝'
+        C_VL, C_VM, C_VR = '╠', '╬', '╣'
+        C_V,  C_H        = '║', '═'
         
-        # --- TOP ---
-        line = TL + H*w_id
-        line += TM + H*w_cell # Start
-        for _ in range(turni): line += TM + H*w_cell
-        line += TR
-        print("\n" + line)
+        # Helper per righe orizzontali
+        def print_sep(left, mid, right, intersect):
+            # Costruisce la riga sommando esattamente le lunghezze W_ID e W_DATA
+            line = left + (C_H * W_ID)
+            for _ in range(turni_totali + 1): 
+                line += intersect + (C_H * W_DATA)
+            line += right
+            print(line)
+
+        print("\n")
         
-        # --- HEADER ---
-        row = f"{V} {'CONC.':^{w_id}}"
-        row += f"{V} {'PARTENZA':^{w_cell}}"
-        for t in range(1, turni + 1): row += f"{V} {f'TURNO {t}':^{w_cell}}"
-        row += V
-        print(row)
+        # 1. BORDO SUPERIORE
+        print_sep(C_TL, C_TM, C_TR, C_TM)
         
-        # --- SEPARATOR ---
-        line = VL + H*w_id
-        line += VM + H*w_cell
-        for _ in range(turni): line += VM + H*w_cell
-        line += VR
-        print(line)
+        # 2. INTESTAZIONE
+        # Nota: usiamo f"{C_V}{text:^{Width}}" SENZA spazi tra V e text
+        header = f"{C_V}{'CONC.':^{W_ID}}"
+        header += f"{C_V}{'PARTENZA':^{W_DATA}}"
+        for t in range(1, turni_totali + 1):
+            header += f"{C_V}{f'TURNO {t}':^{W_DATA}}"
+        header += C_V
+        print(header)
         
-        # --- DATA ROWS ---
+        # 3. SEPARATORE
+        print_sep(C_VL, C_VM, C_VR, C_VM)
+        
+        # 4. RIGHE DATI
         for cid in range(1, self.n + 1):
-            # Start
+            # ID
+            row = f"{C_V}{f'ID {cid}':^{W_ID}}"
+            
+            # Partenza
             pos0 = self.tabella_turni[0]['dati'][cid]
             sett0 = self.ottieni_settore(pos0) + 1
-            txt_start = f"S{sett0} - P{pos0+1:02d}"
+            txt_start = f"S{sett0}-P{pos0+1:02d}"
+            row += f"{C_V}{txt_start:^{W_DATA}}"
             
-            row = f"{V} {f'ID {cid}':^{w_id}}{V} {txt_start:^{w_cell}}"
-            
-            for t in range(1, turni + 1):
+            # Turni
+            for t in range(1, turni_totali + 1):
                 pos = self.tabella_turni[t]['dati'][cid]
                 pos_prev = self.tabella_turni[t-1]['dati'][cid]
                 sett = self.ottieni_settore(pos) + 1
                 salto = (pos - pos_prev + self.n) % self.n
                 
-                txt = f"S{sett} - P{pos+1:02d} [+{salto}]"
-                row += f"{V} {txt:^{w_cell}}"
+                simbolo = " *" if salto < self.target_min_salto else ""
+                content = f"S{sett}-P{pos+1:02d} (+{salto}{simbolo})"
+                
+                row += f"{C_V}{content:^{W_DATA}}"
             
-            row += V
+            row += C_V
             print(row)
-            
-        # --- BOTTOM ---
-        line = BL + H*w_id
-        line += BM + H*w_cell
-        for _ in range(turni): line += BM + H*w_cell
-        line += BR
-        print(line)
-        print("Legenda: S=Settore, P=Picchetto, [+N]=Passi fatti")
+        
+        # 5. BORDO INFERIORE
+        print_sep(C_BL, C_BM, C_BR, C_BM)
+        print(f" LEGENDA: (*) = Salto ridotto per 'Sopravvivenza'. Minimo richiesto era +{self.target_min_salto}")
 
-# --- PARAMETRI DI CONFIGURAZIONE ---
-N_CONCORRENTI = 24
+    def esporta_csv(self):
+        try:
+            filename = "gara_fixed.csv"
+            with open(filename, 'w', newline='') as f:
+                w = csv.writer(f, delimiter=';')
+                h = ["ID", "Start"]
+                for t in range(1, len(self.tabella_turni)): h.extend([f"Turno {t}", f"Salto {t}"])
+                w.writerow(h)
+                for cid in range(1, self.n + 1):
+                    r = [f"ID {cid}"]
+                    p0 = self.tabella_turni[0]['dati'][cid]
+                    r.append(f"S{self.ottieni_settore(p0)+1}-P{p0+1}")
+                    for t in range(1, len(self.tabella_turni)):
+                        p = self.tabella_turni[t]['dati'][cid]
+                        pp = self.tabella_turni[t-1]['dati'][cid]
+                        salto = (p - pp + self.n) % self.n
+                        r.append(f"S{self.ottieni_settore(p)+1}-P{p+1}")
+                        r.append(salto)
+                    w.writerow(r)
+            print(f"\n[OK] CSV Salvato in: {filename}")
+        except: pass
+
+# --- CONFIGURAZIONE ---
+N_CONCORRENTI = 36
 M_SETTORI = 6
 N_TURNI = 4
-MAX_SALTO = 8  # Distanza massima percorribile in un turno
+TARGET_MIN_SALTO = 2 
 
-# --- MAIN ESECUZIONE ---
 def main():
-    print("\n" + "="*60)
-    print(f"  GENERATORE GARA AVANZATO (v3.0 Ultimate)")
-    print(f"  {N_CONCORRENTI} Concorrenti | {M_SETTORI} Settori | {N_TURNI} Turni")
-    print(f"  Vincoli: No settori adiacenti, No ripetizioni picchetti")
-    print("="*60 + "\n")
+    print("\n" + "="*70)
+    print(f"  GARA CON TABELLA ALLINEATA (FIXED)")
+    print("="*70)
     
-    manager = GaraManager(N_CONCORRENTI, M_SETTORI, MAX_SALTO)
-    manager.inizializza()
+    mgr = GaraManager(N_CONCORRENTI, M_SETTORI, TARGET_MIN_SALTO)
+    mgr.inizializza()
     
-    start_time = time.time()
-    
-    successo_totale = True
+    start = time.time()
     for t in range(1, N_TURNI + 1):
-        if not manager.calcola_turno(t):
-            print(f"\n\n[ERRORE FATALE] Impossibile risolvere il Turno {t}.")
-            print("Consiglio: Aumenta MAX_SALTO o riduci i vincoli.")
-            successo_totale = False
+        if not mgr.calcola_turno(t):
+            print(f"\n[CRITICO] Impossibile risolvere Turno {t}.")
             break
             
-    print(f"\n\nCalcolo completato in {time.time() - start_time:.2f} secondi.")
-    
-    if successo_totale:
-        manager.stampa_tabella_unicode()
-        manager.esporta_csv()
-    else:
-        print("Tabella parziale generata fino al momento dell'errore.")
-        manager.stampa_tabella_unicode()
+    print(f"\nCalcolo finito in {time.time()-start:.2f}s")
+    mgr.stampa_tabella_perfetta()
+    mgr.esporta_csv()
 
 if __name__ == "__main__":
     main()
