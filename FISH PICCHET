@@ -1,0 +1,248 @@
+import sys
+import random
+import time
+import csv
+
+# Aumentiamo la profondità di ricorsione per i calcoli complessi
+sys.setrecursionlimit(5000)
+
+class GaraManager:
+    def __init__(self, n_concorrenti, m_settori, max_salto):
+        self.n = n_concorrenti
+        self.m = m_settori
+        self.max_salto = max_salto
+        self.picchetti_per_settore = n_concorrenti // m_settori
+        
+        # Strutture Dati
+        self.storia_visite = {i: set() for i in range(1, self.n + 1)}
+        self.stato_attuale = {}
+        self.tabella_turni = [] # Lista di dizionari per lo storico
+        
+    def ottieni_settore(self, p_idx):
+        return p_idx // self.picchetti_per_settore
+
+    def inizializza(self):
+        """Assegnazione casuale iniziale"""
+        posizioni = list(range(self.n))
+        random.shuffle(posizioni)
+        for i in range(1, self.n + 1):
+            pos = posizioni.pop()
+            self.stato_attuale[i] = pos
+            self.storia_visite[i].add(pos)
+        
+        # Salva turno 0
+        self.tabella_turni.append({'turno': 0, 'dati': self.stato_attuale.copy()})
+
+    def _backtrack_solve(self, idx_conc, elenco_conc, assegnazioni_turno, occupati_turno):
+        """Motore ricorsivo per trovare la soluzione del turno"""
+        # Caso Base: Tutti sistemati
+        if idx_conc >= len(elenco_conc):
+            return assegnazioni_turno
+
+        cid = elenco_conc[idx_conc]
+        pos_old = self.stato_attuale[cid]
+        sett_old = self.ottieni_settore(pos_old)
+
+        # Genera mosse possibili (mescolate)
+        salti = list(range(1, self.max_salto + 1))
+        random.shuffle(salti)
+
+        for salto in salti:
+            pos_new = (pos_old + salto) % self.n
+            
+            # --- FILTRI DI VALIDITÀ ---
+            if pos_new in occupati_turno: continue          # Già preso ora
+            if pos_new in self.storia_visite[cid]: continue # Già visitato in passato
+            
+            sett_new = self.ottieni_settore(pos_new)
+            
+            # Regole Settori (Strict)
+            if sett_new == sett_old: continue
+            if sett_new == (sett_old + 1) % self.m: continue
+            if sett_new == (sett_old - 1 + self.m) % self.m: continue
+
+            # --- TENTATIVO ---
+            # Applica mossa temporanea
+            occupati_turno.add(pos_new)
+            assegnazioni_turno[cid] = pos_new
+            
+            # Ricorsione
+            res = self._backtrack_solve(idx_conc + 1, elenco_conc, assegnazioni_turno, occupati_turno)
+            
+            if res is not None:
+                return res # Successo! Risaliamo la china
+            
+            # Backtrack (Annulla mossa e riprova prossimo salto)
+            del assegnazioni_turno[cid]
+            occupati_turno.remove(pos_new)
+
+        return None # Nessuna mossa valida trovata per questo ramo
+
+    def calcola_turno(self, numero_turno):
+        """Gestisce il tentativo di calcolo con Retry"""
+        MAX_RETRIES = 10
+        
+        for tentativo in range(1, MAX_RETRIES + 1):
+            # Prepariamo l'ordine casuale di risoluzione
+            concorrenti = list(range(1, self.n + 1))
+            random.shuffle(concorrenti)
+            
+            occupati = set()
+            assegnazioni = {}
+            
+            print(f"   > Elaborazione Turno {numero_turno} (Tentativo {tentativo}/{MAX_RETRIES})...", end='\r')
+            
+            risultato = self._backtrack_solve(0, concorrenti, assegnazioni, occupati)
+            
+            if risultato is not None:
+                # Successo
+                self.stato_attuale = risultato
+                for cid, pos in risultato.items():
+                    self.storia_visite[cid].add(pos)
+                
+                self.tabella_turni.append({'turno': numero_turno, 'dati': risultato.copy()})
+                return True
+            
+            # Se fallisce, il ciclo continua e riprova con un shuffle diverso
+        
+        return False
+
+    def esporta_csv(self, filename="rotazione_picchetti.csv"):
+        """Salva i risultati su file"""
+        try:
+            with open(filename, mode='w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file, delimiter=';')
+                
+                # Header
+                header = ["ID Concorrente", "Partenza (Sett - Picc)"]
+                for t in range(1, len(self.tabella_turni)):
+                    header.append(f"Turno {t} (Sett - Picc)")
+                    header.append(f"Salto {t}")
+                writer.writerow(header)
+                
+                # Righe
+                for cid in range(1, self.n + 1):
+                    row = [f"ID {cid}"]
+                    
+                    # Partenza
+                    pos0 = self.tabella_turni[0]['dati'][cid]
+                    sett0 = self.ottieni_settore(pos0) + 1
+                    row.append(f"S{sett0}-P{pos0+1}")
+                    
+                    # Turni
+                    for t in range(1, len(self.tabella_turni)):
+                        pos_curr = self.tabella_turni[t]['dati'][cid]
+                        pos_prev = self.tabella_turni[t-1]['dati'][cid]
+                        sett_curr = self.ottieni_settore(pos_curr) + 1
+                        salto = (pos_curr - pos_prev + self.n) % self.n
+                        
+                        row.append(f"S{sett_curr}-P{pos_curr+1}")
+                        row.append(f"+{salto}")
+                    
+                    writer.writerow(row)
+            print(f"\n[OK] File '{filename}' salvato con successo.")
+        except Exception as e:
+            print(f"\n[ERRORE] Impossibile salvare CSV: {e}")
+
+    def stampa_tabella_unicode(self):
+        """Stampa a video con grafica avanzata"""
+        turni = len(self.tabella_turni) - 1
+        
+        # Larghezze colonne
+        w_id = 10
+        w_cell = 20
+        
+        # Caratteri Box-Drawing
+        TL, TM, TR = '╔', '╦', '╗'
+        BL, BM, BR = '╚', '╩', '╝'
+        VL, VM, VR = '╠', '╬', '╣'
+        V, H = '║', '═'
+        
+        # --- TOP ---
+        line = TL + H*w_id
+        line += TM + H*w_cell # Start
+        for _ in range(turni): line += TM + H*w_cell
+        line += TR
+        print("\n" + line)
+        
+        # --- HEADER ---
+        row = f"{V} {'CONC.':^{w_id}}"
+        row += f"{V} {'PARTENZA':^{w_cell}}"
+        for t in range(1, turni + 1): row += f"{V} {f'TURNO {t}':^{w_cell}}"
+        row += V
+        print(row)
+        
+        # --- SEPARATOR ---
+        line = VL + H*w_id
+        line += VM + H*w_cell
+        for _ in range(turni): line += VM + H*w_cell
+        line += VR
+        print(line)
+        
+        # --- DATA ROWS ---
+        for cid in range(1, self.n + 1):
+            # Start
+            pos0 = self.tabella_turni[0]['dati'][cid]
+            sett0 = self.ottieni_settore(pos0) + 1
+            txt_start = f"S{sett0} - P{pos0+1:02d}"
+            
+            row = f"{V} {f'ID {cid}':^{w_id}}{V} {txt_start:^{w_cell}}"
+            
+            for t in range(1, turni + 1):
+                pos = self.tabella_turni[t]['dati'][cid]
+                pos_prev = self.tabella_turni[t-1]['dati'][cid]
+                sett = self.ottieni_settore(pos) + 1
+                salto = (pos - pos_prev + self.n) % self.n
+                
+                txt = f"S{sett} - P{pos+1:02d} [+{salto}]"
+                row += f"{V} {txt:^{w_cell}}"
+            
+            row += V
+            print(row)
+            
+        # --- BOTTOM ---
+        line = BL + H*w_id
+        line += BM + H*w_cell
+        for _ in range(turni): line += BM + H*w_cell
+        line += BR
+        print(line)
+        print("Legenda: S=Settore, P=Picchetto, [+N]=Passi fatti")
+
+# --- PARAMETRI DI CONFIGURAZIONE ---
+N_CONCORRENTI = 24
+M_SETTORI = 6
+N_TURNI = 4
+MAX_SALTO = 8  # Distanza massima percorribile in un turno
+
+# --- MAIN ESECUZIONE ---
+def main():
+    print("\n" + "="*60)
+    print(f"  GENERATORE GARA AVANZATO (v3.0 Ultimate)")
+    print(f"  {N_CONCORRENTI} Concorrenti | {M_SETTORI} Settori | {N_TURNI} Turni")
+    print(f"  Vincoli: No settori adiacenti, No ripetizioni picchetti")
+    print("="*60 + "\n")
+    
+    manager = GaraManager(N_CONCORRENTI, M_SETTORI, MAX_SALTO)
+    manager.inizializza()
+    
+    start_time = time.time()
+    
+    successo_totale = True
+    for t in range(1, N_TURNI + 1):
+        if not manager.calcola_turno(t):
+            print(f"\n\n[ERRORE FATALE] Impossibile risolvere il Turno {t}.")
+            print("Consiglio: Aumenta MAX_SALTO o riduci i vincoli.")
+            successo_totale = False
+            break
+            
+    print(f"\n\nCalcolo completato in {time.time() - start_time:.2f} secondi.")
+    
+    if successo_totale:
+        manager.stampa_tabella_unicode()
+        manager.esporta_csv()
+    else:
+        print("Tabella parziale generata fino al momento dell'errore.")
+        manager.stampa_tabella_unicode()
+
+if __name__ == "__main__":
+    main()
